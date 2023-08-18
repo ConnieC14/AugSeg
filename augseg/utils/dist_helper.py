@@ -35,6 +35,12 @@ def setup_distributed(backend="nccl", port=None):
     else:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
+        if port is not None:
+            os.environ["MASTER_PORT"] = str(port)
+        elif "MASTER_PORT" not in os.environ:
+            os.environ["MASTER_PORT"] = "10685"
+        if "MASTER_ADDR" not in os.environ:
+            os.environ["MASTER_ADDR"] = "localhost"
 
     torch.cuda.set_device(rank % num_gpus)
 

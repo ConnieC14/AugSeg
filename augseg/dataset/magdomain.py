@@ -1,13 +1,11 @@
 import copy
 import math
-import os
 import os.path
 import random
 
 import numpy as np
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torchvision import transforms
 
 from . import augs_TIBA as img_trsform
 from .base import BaseDataset
@@ -19,14 +17,13 @@ def seed_worker(worker_id):
     np.random.seed(cur_seed)
     random.seed(cur_seed)
 
-
-class voc_dset(BaseDataset):
+class magdomain_dset(BaseDataset):
     def __init__(
         self, data_root, data_list, trs_form, trs_form_strong=None, 
-        seed=0, n_sup=10582, split="val", flag_semi=False,
+        seed=0, n_sup=60, split="val", flag_semi=False,
         mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
     ):
-        super(voc_dset, self).__init__(data_list)
+        super(magdomain_dset, self).__init__(data_list)
         self.data_root = data_root
         self.transform_weak = trs_form
         self.transform_strong = trs_form_strong
@@ -60,7 +57,7 @@ class voc_dset(BaseDataset):
         label_path = os.path.join(self.data_root, self.list_sample_new[index][1])
         image = self.img_loader(image_path, "RGB")
         label = self.img_loader(label_path, "L")
-
+        
         if self.transform_strong is None:
             image, label = self.transform_weak(image, label)
             # print(image.shape, label.shape)
@@ -101,20 +98,20 @@ def build_basic_transfrom(cfg, split="val", mean=[0.485, 0.456, 0.406]):
     trs_form = []
     if split != "val":
         if cfg.get("rand_resize", False):
-            trs_form.append(img_trsform.Resize(cfg.get("resize_base_size", 600), cfg["rand_resize"]))
+            trs_form.append(img_trsform.Resize(cfg.get("resize_base_size", [1024, 2048]), cfg["rand_resize"]))
         
         if cfg.get("flip", False):
             trs_form.append(img_trsform.RandomFlip(prob=0.5, flag_hflip=True))
-
-    # crop also sometime for validating
-    if cfg.get("crop", False):
-        crop_size, crop_type = cfg["crop"]["size"], cfg["crop"]["type"]
-        trs_form.append(img_trsform.Crop(crop_size, crop_type=crop_type, mean=mean, ignore_value=ignore_label))
+    
+        # crop also sometime for validating
+        if cfg.get("crop", False):
+            crop_size, crop_type = cfg["crop"]["size"], cfg["crop"]["type"]
+            trs_form.append(img_trsform.Crop(crop_size, crop_type=crop_type, mean=mean, ignore_value=ignore_label))
 
     return img_trsform.Compose(trs_form)
 
 
-def build_vocloader(split, all_cfg, seed=0):
+def build_magdomainloader(split, all_cfg, seed=0):
     # extract augs config from "train"/"val" into the higher level.
     cfg_dset = all_cfg["dataset"]
     cfg = copy.deepcopy(cfg_dset)
@@ -123,14 +120,14 @@ def build_vocloader(split, all_cfg, seed=0):
     # set up workers and batchsize
     workers = cfg.get("workers", 2)
     batch_size = cfg.get("batch_size", 1)
-    n_sup = cfg.get("n_sup", 10582)
+    n_sup = cfg.get("n_sup", 2100)
     
     # build transform
     mean, std = cfg["mean"], cfg["std"]
     trs_form = build_basic_transfrom(cfg, split=split, mean=mean)
     
     # create dataset
-    dset = voc_dset(cfg["data_root"], cfg["data_list"], trs_form, None, 
+    dset = magdomain_dset(cfg["data_root"], cfg["data_list"], trs_form, None, 
         seed, n_sup, mean=mean, std=std)
 
     # build sampler
@@ -146,8 +143,7 @@ def build_vocloader(split, all_cfg, seed=0):
     )
     return loader
 
-
-def build_voc_semi_loader(split, all_cfg, seed=0):
+def build_magdomain_semi_loader(split, all_cfg, seed=0):
     split = "train"
     # extract augs config from "train" into the higher level.
     cfg_dset = all_cfg["dataset"]
@@ -157,8 +153,8 @@ def build_voc_semi_loader(split, all_cfg, seed=0):
     # set up workers and batchsize
     workers = cfg.get("workers", 2) 
     batch_size = cfg.get("batch_size", 2)
-    n_sup = 10582 - cfg.get("n_sup", 10582) # oversample labeled data to the amount of unlabeled data
-
+    n_sup = 128 - cfg.get("n_sup", 2100) # oversample labeled data to the amount of unlabeled data
+    
     # build transform
     mean, std = cfg["mean"], cfg["std"]
     trs_form_weak = build_basic_transfrom(cfg, split=split, mean=mean)
@@ -167,12 +163,13 @@ def build_voc_semi_loader(split, all_cfg, seed=0):
     else:
         trs_form_strong = None
     
-    dset = voc_dset(cfg["data_root"], cfg["data_list"], trs_form_weak, None, 
-                    seed, n_sup, split=split, mean=mean, std=std)    
+    dset = magdomain_dset(cfg["data_root"], cfg["data_list"], trs_form_weak, None, 
+                          seed, n_sup, split=split, 
+                          mean=mean, std=std)    
     sample_sup = DistributedSampler(dset)
 
     data_list_unsup = cfg["data_list"].replace("labeled.txt", "unlabeled.txt")
-    dset_unsup = voc_dset(cfg["data_root"], data_list_unsup, trs_form_weak, trs_form_strong,
+    dset_unsup = magdomain_dset(cfg["data_root"], data_list_unsup, trs_form_weak, trs_form_strong,
                             seed, n_sup, split,
                             flag_semi=True,
                             mean=mean, std=std)
@@ -200,3 +197,4 @@ def build_voc_semi_loader(split, all_cfg, seed=0):
         worker_init_fn=seed_worker,
     )
     return loader_sup, loader_unsup
+

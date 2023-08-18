@@ -28,6 +28,14 @@ class BaseDataset(Dataset):
                 ]
                 for line in open(d_list, "r")
             ]
+        elif "magnetic_domain" in d_list:
+            self.list_sample = [
+                [
+                    "NormalizedMagDomRaw01/{}.png".format(line.strip()),#NormalizedMagDom01
+                    "PNGMasks/{}.png".format(line.strip()) # "AllLabels/{} - all labels.png".format(line.strip())
+                ]
+                for line in open(d_list, "r")
+            ]
         else:
             raise "unknown dataset!"
 

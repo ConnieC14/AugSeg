@@ -62,7 +62,7 @@ trainer: # Required.
 saver:
   snapshot_dir: checkpoints
   pretrain: ''
-  use_tb: False
+  use_tb: True
 
 criterion:
   type: CELoss

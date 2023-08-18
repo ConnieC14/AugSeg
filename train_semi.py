@@ -9,6 +9,7 @@ import pickle
 import random
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
@@ -23,20 +24,21 @@ from augseg.utils.loss_helper import get_criterion, compute_unsupervised_loss_by
 from augseg.utils.lr_helper import get_optimizer, get_scheduler
 from augseg.utils.utils import AverageMeter, intersectionAndUnion, load_state
 from augseg.utils.utils import init_log, get_rank, get_world_size, set_random_seed, setup_default_logging
+from augseg.utils.utils import gather_metrics
 
 import warnings 
 warnings.filterwarnings('ignore')
-
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 def main(in_args):
     args = in_args
     if args.seed is not None:
-        # print("set random seed to", args.seed)
+        print("set random seed to", args.seed)
         set_random_seed(args.seed, deterministic=True)
         # set_random_seed(args.seed)
     cfg = yaml.load(open(args.config, "r"), Loader=yaml.Loader)
     rank, word_size = setup_distributed(port=args.port)
-
+    
     ###########################
     # 1. output settings
     ###########################
@@ -93,7 +95,7 @@ def main(in_args):
     ##############################
     cfg_trainer = cfg["trainer"]
     cfg_optim = cfg_trainer["optimizer"]
-    times = 10 if "pascal" in cfg["dataset"]["type"] else 1
+    times = 10 if "pascal" or "magdomain"in cfg["dataset"]["type"] else 1
 
     params_list = []
     for module in modules_back:
@@ -142,6 +144,18 @@ def main(in_args):
     best_epoch = -1
     best_prec_stu = 0
     best_epoch_stu = -1
+
+    best_metrics = {
+        'precision': 0,
+        'recall': 0,
+        'f1_score': 0
+    }
+    best_metrics_stu = {
+        'precision': 0,
+        'recall': 0,
+        'f1_score': 0
+    }
+
     # auto_resume > pretrain
     if cfg["saver"].get("auto_resume", False):
         lastest_model = os.path.join(cfg["save_path"], "ckpt.pth")
@@ -198,12 +212,20 @@ def main(in_args):
                 prec = prec_tea
         else:
             if cfg_trainer.get("evaluate_student", True):
-                prec_stu = validate(model, val_loader, epoch, logger, cfg)
+                prec_stu = validate(model, val_loader, epoch, logger, cfg, tb_logger)
+                metrics_stu = gather_metrics(model, val_loader, epoch, logger, cfg, tb_logger)
             else:
                 prec_stu = -1000.0
-            prec_tea = validate(model_teacher, val_loader, epoch, logger, cfg)
+                metrics_stu = {
+                    'precision': -1000.0,
+                    'recall': -1000.0,
+                    'f1_score': -1000.0
+                }
+            prec_tea = validate(model_teacher, val_loader, epoch, logger, cfg, tb_logger)
             prec = prec_tea
-
+            metrics_tea = gather_metrics(model_teacher, val_loader, epoch, logger, cfg, tb_logger)
+            metrics = metrics_tea
+        
         if rank == 0:
             state = {
                 "epoch": epoch + 1,
@@ -211,7 +233,17 @@ def main(in_args):
                 "optimizer_state": optimizer.state_dict(),
                 "teacher_state": model_teacher.state_dict(),
                 "best_miou": best_prec,
+                "best_metrics": best_metrics,
             }
+
+            for i, m in enumerate(metrics_stu):
+                if metrics_stu[m] > best_metrics_stu[m]:
+                    best_metrics_stu[m] = metrics_stu[m]
+
+                if metrics[m] > best_metrics[m]:
+                    best_metrics[m] = metrics[m]
+                    state["best_metrics"] = metrics
+            
             if prec_stu > best_prec_stu:
                 best_prec_stu = prec_stu
                 best_epoch_stu = epoch
@@ -229,6 +261,12 @@ def main(in_args):
                         'loss_ub': res_loss_unsup,
                         'miou_stu': prec_stu,
                         'miou_tea': prec_tea,
+                        'prec_stu': metrics_stu['precision'],
+                        'recall_stu': metrics_stu['recall'], 
+                        'f1_score_stu': metrics_stu['f1_score'], 
+                        'prec_tea': metrics_tea['precision'], 
+                        'recall_tea': metrics_tea['recall'], 
+                        'f1_score_tea': metrics_tea['f1_score'],  
                         "best": best_prec,
                         "best-stu":best_prec_stu}
             data_frame = pd.DataFrame(data=tmp_results, index=range(epoch, epoch+1))
@@ -283,7 +321,7 @@ def train(
     print_freq = len(loader_u) // 8 # 8 for semi 4 for sup
     print_freq_lst = [i * print_freq for i in range(1,8)]
     print_freq_lst.append(len(loader_u) -1)
-
+    
     # start iterations
     model.train()
     model_teacher.eval()
@@ -373,7 +411,7 @@ def train(
                 del aux_all, aux
             else:
                 sup_loss = sup_loss_fn(pred_l, label_l)
-
+            
             # 5. unsupervised loss
             unsup_loss, pseduo_high_ratio = compute_unsupervised_loss_by_threshold(
                         pred_u_strong, label_u_aug.detach(),
@@ -458,7 +496,8 @@ def validate(
     data_loader,
     epoch,
     logger,
-    cfg
+    cfg,
+    tb_logger
 ):
     model.eval()
     data_loader.sampler.set_epoch(epoch)
@@ -483,7 +522,16 @@ def validate(
         # get the output produced by model_teacher
         output = output.data.max(1)[1].cpu().numpy()
         target_origin = labels.cpu().numpy()
-
+        
+        if epoch % 10 == 0 and tb_logger:
+            fig = plot_comparison(images, target_origin, output)
+            fig.suptitle(f"Magnetization Domain Epoch {epoch}")
+            out = '/'.join(tb_logger.log_dir.split('/')[:-1]) + tb_logger.log_dir.split('/')[-1] + "/images/"
+            if not os.path.exists(out) and rank == 0:
+                os.makedirs(out)
+            fig.savefig(out + f"val_n_epoch_{epoch}_step_{step}_mask.png")
+            plt.close(fig)
+        
         # start to calculate miou
         intersection, union, target = intersectionAndUnion(
             output, target_origin, num_classes, ignore_label
@@ -509,6 +557,69 @@ def validate(
             logger.info(" [Test] -  class [{}] IoU {:.2f}".format(i, iou * 100))
 
     return mIoU
+
+
+
+def show_mask(mask, ax, random_color=False, color=[]):
+    """
+
+    """
+    if random_color:
+        color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
+    elif len(color) > 0:
+        pass
+    else:
+        color = np.array([251 / 255, 252 / 255, 30 / 255, 0.6])
+    h, w = mask.shape[-2:]
+    mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
+    ax.imshow(mask_image)
+    
+    return ax
+
+
+def plot_comparison(image, mask2D, pred):
+    """
+        idx: batch layer if there are batches
+    """
+    image = image.cpu().numpy()
+    batch_size, num_channels, height, width = image.shape
+    
+    fig, axes = plt.subplots(batch_size, 3, figsize=(15, 5 * batch_size))
+    fig.subplots_adjust(hspace=0.2, wspace=0.2)
+
+    for i in range(batch_size):
+        image = np.transpose(image[i], (1, 2, 0)) if num_channels == 3 else image[i, 0]
+        pred = pred[i]
+        label = mask2D[i]
+
+        if batch_size == 1:
+            axes[0].imshow(image, cmap='gray' if num_channels == 1 else None)
+            axes[0].set_title('Image')
+            axes[0].axis('off')
+
+            axes[1].imshow(pred, cmap='gray')
+            axes[1].set_title('Prediction')
+            axes[1].axis('off')
+
+            axes[2].imshow(label, cmap='gray')
+            axes[2].set_title('Label')
+            axes[2].axis('off')
+        else:
+            axes[i, 0].imshow(image, cmap='gray' if num_channels == 1 else None)
+            axes[i, 0].set_title('Image')
+            axes[i, 0].axis('off')
+
+            axes[i, 1].imshow(pred, cmap='gray')
+            axes[i, 1].set_title('Prediction')
+            axes[i, 1].axis('off')
+
+            axes[i, 2].imshow(label, cmap='gray')
+            axes[i, 2].set_title('Label')
+            axes[i, 2].axis('off')
+    
+    plt.subplots_adjust(wspace=0.01, hspace=0)
+
+    return fig
 
 
 def validate_citys(
@@ -558,7 +669,7 @@ def validate_citys(
             output, target_origin, num_classes, ignore_label
         )
         # # return ndarray, b*clas
-        # print("="*20, type(intersection), type(union), type(target), intersection, union, target)
+        print("="*20, type(intersection), type(union), type(target), intersection, union, target)
 
         # gather all validation information
         reduced_intersection = torch.from_numpy(intersection).cuda()
@@ -588,4 +699,35 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--port", default=None, type=int)
     args = parser.parse_args()
+        
+    os.environ["WORLD_SIZE"] = str(get_world_size())
+    
+    if not args.local_rank:
+        os.environ["LOCAL_RANK"] = str(args.local_rank)
+        os.environ["RANK"] = str(get_rank())
+    
+    args.node_rank = 0
+    args.nproc_per_node = 1 #torch.cuda.device_count()
+    
+    nb_cpu_threads = 1
+    os.environ["OMP_NUM_THREADS"] = str(int(nb_cpu_threads / args.nproc_per_node))
+    
+    print("num threads: ", os.environ["OMP_NUM_THREADS"])
+    
+    if not args.port:
+        tport = 12345
+        args.port = tport
+    os.environ['MASTER_PORT'] = str(args.port)
+
+    # if not args.seed:
+    #     args.seed = 23
+    
+    if args.config == "config.yaml":
+        args.config = os.getcwd() + '/exps/zrun_magdomains/magdomain_semi128/config_semi.yaml'
+    #'/exps/zrun_vocs/r50_voc_semi662/config_semi.yaml'
+    
+    torch.cuda.set_device(args.node_rank)
+
+    os.environ["NCCL_DEBUG"] = "INFO"
+
     main(args)

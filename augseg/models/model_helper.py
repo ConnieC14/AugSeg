@@ -9,7 +9,9 @@ class ModelBuilder(nn.Module):
         super(ModelBuilder, self).__init__()
         self._sync_bn = net_cfg["sync_bn"]
         self._num_classes = net_cfg["num_classes"]
-
+        
+        print(f"Number of classes in network: {self._num_classes}")
+        
         self.encoder = self._build_encoder(net_cfg["encoder"])
         self.decoder = self._build_decoder(net_cfg["decoder"])
 

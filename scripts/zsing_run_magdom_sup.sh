@@ -1,4 +1,4 @@
-tport=53907
+tport=55567
 ngpu=2
 ROOT=.
 
@@ -8,7 +8,9 @@ python -m torch.distributed.launch \
     --node_rank=0 \
     --master_port=${tport} \
     $ROOT/train_semi.py \
-    --config=$ROOT/exps/zrun_vocs_u2pl/voc_semi662/config_semi.yaml --seed 2 --port ${tport}
+    --config=$ROOT/exps/zrun_magdomains/magdomain_sup128/config.yaml \
+    --port ${tport} \
+    --seed=23
 
 # ---- -----
     # --config=$ROOT/exps/zrun_vocs/voc_semi_fine92/config_semi.yaml --seed 2 --port ${tport}

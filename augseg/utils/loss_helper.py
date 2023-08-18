@@ -300,7 +300,7 @@ class OhemCrossEntropy2dTensor(nn.Module):
 
         target = target.masked_fill_(~valid_mask, self.ignore_index)
         target = target.view(b, h, w)
-
+        
         return self.criterion(pred, target)
 
 
@@ -309,8 +309,15 @@ class OhemCrossEntropy2dTensor(nn.Module):
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 def compute_unsupervised_loss_by_threshold(predict, target, logits, thresh=0.95):
     batch_size, num_class, h, w = predict.shape
+    # print(f"batch size:{batch_size}, num class:{num_class}, h:{h},w:{w}")
+    
     thresh_mask = logits.ge(thresh).bool() * (target != 255).bool()
+    
+    # print(f"prediction range: {(predict.min(), predict.max())}\ntarget range: {(target.min(), target.max())}")
+    # print(f"\nthresh_mask: {(thresh_mask.min(),thresh_mask.max())}")
+
     target[~thresh_mask] = 255
+
     loss = F.cross_entropy(predict, target, ignore_index=255, reduction="none")
     return loss.mean(), thresh_mask.float().mean()
 

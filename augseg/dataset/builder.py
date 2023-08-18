@@ -2,9 +2,9 @@ import logging
 
 from .cityscapes import build_city_semi_loader, build_cityloader
 from .pascal_voc import build_voc_semi_loader, build_vocloader
+from .magdomain import build_magdomain_semi_loader, build_magdomainloader
 
 logger = logging.getLogger("global")
-
 
 def get_loader(cfg, seed=0):
     cfg_dataset = cfg["dataset"]
@@ -36,7 +36,21 @@ def get_loader(cfg, seed=0):
         val_loader = build_vocloader("val", cfg)
         logger.info("Get loader Done...")
         return train_loader_sup, val_loader
-
+    
+    elif cfg_dataset["type"] == "magdomain_semi":
+        train_loader_sup, train_loader_unsup = build_magdomain_semi_loader(
+            "train", cfg, seed=seed
+        )
+        val_loader = build_magdomainloader("val", cfg)
+        logger.info("Get loader Done...")
+        return train_loader_sup, train_loader_unsup, val_loader
+    
+    elif cfg_dataset["type"] == "magdomain":
+        train_loader_sup = build_magdomainloader("train", cfg, seed=seed)
+        val_loader = build_magdomainloader("val", cfg)
+        logger.info("Get loader Done...")
+        return train_loader_sup, val_loader
+    
     else:
         raise NotImplementedError(
             "dataset type {} is not supported".format(cfg_dataset)

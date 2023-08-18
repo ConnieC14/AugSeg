@@ -50,6 +50,72 @@ def synchronize():
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+def gather_metrics(model, data_loader, epoch, logger, cfg, tb_logger):
+    model.eval()
+    data_loader.sampler.set_epoch(epoch)
+
+    num_classes, ignore_label = (
+        cfg["net"]["num_classes"],
+        cfg["dataset"]["ignore_label"],
+    )
+    rank, world_size = dist.get_rank(), dist.get_world_size()
+
+    precision_meter = AverageMeter()
+    recall_meter = AverageMeter()
+    f1_score_meter = AverageMeter()
+
+    for step, batch in enumerate(data_loader):
+        _, images, labels = batch
+        images = images.cuda()
+        labels = labels.long().cuda()
+
+        with torch.no_grad():
+            output, _ = model(images)
+
+        # get the output produced by model_teacher
+        output = output.data.max(1)[1].cpu().numpy()
+        target_origin = labels.cpu().numpy()
+        
+        # start to calculate miou
+        precision, recall, f1_score, target = compute_precision_recall_f1(
+            output, target_origin, num_classes, ignore_label
+        )
+
+        # gather all validation information
+        reduced_precision = torch.from_numpy(precision).cuda()
+        reduced_recall = torch.from_numpy(recall).cuda()
+        reduced_f1_score = torch.from_numpy(f1_score).cuda()
+        reduced_target = torch.from_numpy(target).cuda()
+
+        dist.all_reduce(reduced_precision)
+        dist.all_reduce(reduced_recall)
+        dist.all_reduce(reduced_target)
+        dist.all_reduce(reduced_target)
+
+        precision_meter.update(reduced_precision.cpu().numpy())
+        recall_meter.update(reduced_recall.cpu().numpy())
+        f1_score_meter.update(reduced_f1_score.cpu().numpy())
+
+    precision_class = precision_meter.sum / (precision_meter.sum + 1e-10)
+    m_Precision = np.mean(precision_class)
+    recall_class = precision_meter.sum / (precision_meter.sum + 1e-10)
+    m_Recall = np.mean(recall_class)
+    f1_score_class = precision_meter.sum / (precision_meter.sum + 1e-10)
+    m_f1_score_class = np.mean(f1_score_class)
+
+    if rank == 0:
+        for i, _ in enumerate(precision_class):
+            logger.info("\t [Test] -  class [{}] Precision {:.2f}".format(i, precision_class[i] * 100))
+            logger.info("\t [Test] -  class [{}] Recall {:.2f}".format(i, recall_class[i] * 100))
+            logger.info("\t [Test] -  class [{}] f1_score {:.2f}".format(i, f1_score_class[i] * 100))
+
+    return {
+        'precision': m_Precision, 
+        'recall': m_Recall, 
+        'f1_score': m_f1_score_class}
+
+
+#######
 def cal_pixel_num(pred_map):
     res = [0] * 19
     vals = torch.unique(pred_map)
@@ -566,6 +632,31 @@ def get_palette(num_cls):
             i += 1
             lab >>= 3
     return palette
+
+
+def compute_precision_recall_f1(pred, target, K, ignore_index=255):
+    assert pred.ndim in [1, 2, 3]
+    assert pred.shape == target.shape
+
+    pred = pred.reshape(pred.size).copy()
+    target = target.reshape(target.size)
+
+    pred[np.where(target == ignore_index)[0]] = ignore_index
+
+    true_positive = (pred & target).sum().astype(np.float64)
+    false_positive = (pred & ~target).sum().astype(np.float64)
+    false_negative = (~pred & target).sum().astype(np.float64)
+
+    precision = true_positive / (true_positive + false_positive + 1e-8)
+    recall = true_positive / (true_positive + false_negative + 1e-8)
+    f1_score = 2 * (precision * recall) / (precision + recall + 1e-8)
+
+    area_pred, _ = np.histogram(pred, bins=np.arange(K + 1))
+    area_recall, _ = np.histogram(recall, bins=np.arange(K + 1))
+    area_f1_score, _ = np.histogram(f1_score, bins=np.arange(K + 1))
+    area_target, _ = np.histogram(target, bins=np.arange(K + 1))
+
+    return area_pred, area_recall, area_f1_score, area_target
 
 
 def intersectionAndUnion(output, target, K, ignore_index=255):
